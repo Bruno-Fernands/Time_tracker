@@ -1,0 +1,140 @@
+name: CI/CD
+
+on:
+  push:
+    branches: [ "main" ]
+  pull_request:
+    branches: [ "main" ]
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+
+  test:
+    name: Testes Unitários
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout do repositório
+        uses: actions/checkout@v4
+
+      - name: Instalar Rust (toolchain estável)
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache de dependências Cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target/
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Executar testes
+        run: cargo test --verbose 2>&1 | tee test-report.txt
+
+      - name: Salvar relatório de testes
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-report
+          path: test-report.txt
+
+  # Build 
+  build:
+    name: Build Release
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout do repositório
+        uses: actions/checkout@v4
+
+      - name: Instalar Rust (toolchain estável)
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache de dependências Cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target/
+          key: ${{ runner.os }}-cargo-release-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Compilar binário release
+        run: cargo build --release --verbose
+
+      - name: Salvar binário como artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: tt-linux-x86_64
+          path: target/release/tt
+
+  # Notificação
+  notify:
+    name: Notificação por E-mail
+    runs-on: ubuntu-latest
+    needs: [test, build]
+    if: always()
+
+    steps:
+      - name: Checkout do repositório
+        uses: actions/checkout@v4
+
+      - name: Instalar Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Determinar status do pipeline
+        id: status
+        run: |
+          if [[ "${{ needs.test.result }}" == "success" && "${{ needs.build.result }}" == "success" ]]; then
+            echo "result=success" >> $GITHUB_OUTPUT
+          else
+            echo "result=failure" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Enviar e-mail de notificação
+        env:
+          NOTIFY_EMAIL: ${{ vars.NOTIFY_EMAIL }}
+          SMTP_USER:     ${{ secrets.SMTP_USER }}
+          SMTP_PASSWORD: ${{ secrets.SMTP_PASSWORD }}
+        run: |
+          python3 scripts/notify.py \
+            "${{ steps.status.outputs.result }}" \
+            "https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+
+  # Deploy
+  deploy:
+    name: Deploy — GitHub Release
+    runs-on: ubuntu-latest
+    needs: [test, build]
+    if: needs.test.result == 'success' && needs.build.result == 'success' && github.ref == 'refs/heads/main'
+
+    steps:
+      - name: Checkout do repositório
+        uses: actions/checkout@v4
+
+      - name: Baixar binário do artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: tt-linux-x86_64
+          path: dist/
+
+      - name: Tornar binário executável
+        run: chmod +x dist/tt
+
+      - name: Publicar GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: latest
+          name: "tt — latest build"
+          body: |
+            Build automático gerado pelo pipeline CI/CD.
+            Commit: ${{ github.sha }}
+          files: dist/tt
+          prerelease: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
