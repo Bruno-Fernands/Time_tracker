@@ -113,6 +113,9 @@ jobs:
     needs: [test, build]
     if: needs.test.result == 'success' && needs.build.result == 'success' && github.ref == 'refs/heads/main'
 
+    permissions:
+      contents: write
+
     steps:
       - name: Checkout do repositório
         uses: actions/checkout@v4
